@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS notes (
+  id TEXT PRIMARY KEY,
+  text TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  timestamp INTEGER NOT NULL
+);
