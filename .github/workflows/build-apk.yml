@@ -22,14 +22,31 @@ jobs:
         with:
           channel: 'stable'
 
+      - name: Locate Flutter App Directory
+        id: find_app
+        run: |
+          # Find directory containing pubspec.yaml
+          PUBSPEC_PATH=$(find . -maxdepth 3 -name "pubspec.yaml" | head -n 1)
+          if [ -z "$PUBSPEC_PATH" ]; then
+            echo "Error: pubspec.yaml not found!"
+            exit 1
+          fi
+          APP_DIR=$(dirname "$PUBSPEC_PATH")
+          echo "App directory is: $APP_DIR"
+          echo "app_dir=$APP_DIR" >> $GITHUB_OUTPUT
+
       - name: Get Dependencies
-        run: flutter pub get
+        run: |
+          cd ${{ steps.find_app.outputs.app_dir }}
+          flutter pub get
 
       - name: Build APK
-        run: flutter build apk --release
+        run: |
+          cd ${{ steps.find_app.outputs.app_dir }}
+          flutter build apk --release
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: recap-release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: ${{ steps.find_app.outputs.app_dir }}/build/app/outputs/flutter-apk/app-release.apk
