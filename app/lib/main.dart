@@ -45,7 +45,7 @@ class RecapHomeScreen extends StatefulWidget {
 
 class _RecapHomeScreenState extends State<RecapHomeScreen> {
   // Cloudflare Worker Live Backend API URL
-  final String cloudflareWorkerUrl = "https://recap-backend.YOUR_SUBDOMAIN.workers.dev";
+  final String cloudflareWorkerUrl = "https://recap.gamerbenyt.workers.dev";
   
   // Local IP of the ESP32 "Recapper" device when connected
   final String recapperIp = "http://192.168.1.150";
