@@ -1,0 +1,15 @@
+name = "recap-backend"
+main = "src/index.js"
+compatibility_date = "2024-09-25"
+
+[ai]
+binding = "AI"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "recap-db"
+database_id = "YOUR_D1_DATABASE_ID"
+
+[[vectorize]]
+binding = "VECTOR_INDEX"
+index_name = "recap-index"
