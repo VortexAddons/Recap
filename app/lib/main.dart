@@ -1,14 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:http/http.dart' as http;
-import 'package:intl/intl.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:record/record.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const RecapApp());
 }
 
@@ -21,42 +20,266 @@ class RecapApp extends StatelessWidget {
       title: 'Recap',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF6366F1),
+          brightness: Brightness.dark,
+        ),
         useMaterial3: true,
-        colorSchemeSeed: Colors.indigo,
-        brightness: Brightness.light,
       ),
-      darkTheme: ThemeData(
-        useMaterial3: true,
-        colorSchemeSeed: Colors.indigo,
-        brightness: Brightness.dark,
-      ),
-      themeMode: ThemeMode.system,
-      home: const RecapHomeScreen(),
+      home: const RootHandler(),
     );
   }
 }
 
-class RecapHomeScreen extends StatefulWidget {
-  const RecapHomeScreen({super.key});
+class RootHandler extends StatefulWidget {
+  const RootHandler({super.key});
 
   @override
-  State<RecapHomeScreen> createState() => _RecapHomeScreenState();
+  State<RootHandler> createState() => _RootHandlerState();
 }
 
-class _RecapHomeScreenState extends State<RecapHomeScreen> {
-  // Cloudflare Worker Live Backend API URL
-  final String cloudflareWorkerUrl = "https://recap.gamerbenyt.workers.dev";
-  
-  // Local IP of the ESP32 "Recapper" device when connected
-  final String recapperIp = "http://192.168.1.150";
-
-  final AudioRecorder _phoneRecorder = AudioRecorder();
-  
-  bool _useRecapperHardware = false;
-  bool _isRecording = false;
+class _RootHandlerState extends State<RootHandler> {
+  bool _isConfigured = false;
   bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkSetup();
+  }
+
+  Future<void> _checkSetup() async {
+    final prefs = await SharedPreferences.getInstance();
+    final url = prefs.getString('worker_url');
+    setState(() {
+      _isConfigured = url != null && url.isNotEmpty;
+      _isLoading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    return _isConfigured ? const HomeScreen() : const OnboardingScreen();
+  }
+}
+
+// ONBOARDING & BLE PROVISIONING FLOW
+class OnboardingScreen extends StatefulWidget {
+  const OnboardingScreen({super.key});
+
+  @override
+  State<OnboardingScreen> createState() => _OnboardingScreenState();
+}
+
+class _OnboardingScreenState extends State<OnboardingScreen> {
+  final _ssidController = TextEditingController();
+  final _passController = TextEditingController();
+  final _urlController = TextEditingController();
+
+  BluetoothDevice? _targetDevice;
+  BluetoothCharacteristic? _credChar;
+  BluetoothCharacteristic? _statusChar;
+
+  bool _isScanning = false;
+  bool _isConnecting = false;
+  bool _isProvisioning = false;
+  String _statusMessage = 'Searching for Recapper hardware...';
+  int _step = 1; // 1: Pair, 2: WiFi Details, 3: Voice Check
+
+  @override
+  void initState() {
+    super.initState();
+    _startBLEScan();
+  }
+
+  Future<void> _startBLEScan() async {
+    await [
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+      Permission.locationWhenInUse
+    ].request();
+
+    setState(() {
+      _isScanning = true;
+      _statusMessage = 'Looking for Recapper hardware nearby...';
+    });
+
+    FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
+
+    FlutterBluePlus.scanResults.listen((results) async {
+      for (ScanResult r in results) {
+        if (r.device.platformName == 'Recapper-Hardware') {
+          FlutterBluePlus.stopScan();
+          _connectToDevice(r.device);
+          break;
+        }
+      }
+    });
+  }
+
+  Future<void> _connectToDevice(BluetoothDevice device) async {
+    setState(() {
+      _isScanning = false;
+      _isConnecting = true;
+      _statusMessage = 'Found hardware! Connecting via BLE...';
+      _targetDevice = device;
+    });
+
+    await device.connect();
+    List<BluetoothService> services = await device.discoverServices();
+
+    for (var service in services) {
+      if (service.uuid.toString() == "4fafc201-1fb5-459e-8fcc-c5c9c331914b") {
+        for (var char in service.characteristics) {
+          if (char.uuid.toString() == "beb5483e-36e1-4688-b7f5-ea07361b26a8") {
+            _credChar = char;
+          }
+          if (char.uuid.toString() == "8ec8f08e-0571-4f6d-9491-c6d30284f1a1") {
+            _statusChar = char;
+            await _statusChar!.setNotifyValue(true);
+            _statusChar!.onValueReceived.listen(_handleBLEStatus);
+          }
+        }
+      }
+    }
+
+    setState(() {
+      _isConnecting = false;
+      _step = 2;
+    });
+  }
+
+  void _handleBLEStatus(List<int> value) async {
+    String status = utf8.decode(value);
+    if (status.startsWith("CONNECTED")) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('worker_url', _urlController.text.trim());
+
+      setState(() {
+        _isProvisioning = false;
+        _step = 3; // Move to Voice Match test
+      });
+    } else if (status == "FAILED") {
+      setState(() {
+        _isProvisioning = false;
+        _statusMessage = 'Wi-Fi Connection Failed. Check password.';
+      });
+    }
+  }
+
+  Future<void> _sendProvisioning() async {
+    if (_credChar == null) return;
+
+    setState(() {
+      _isProvisioning = true;
+      _statusMessage = 'Sending Wi-Fi credentials over BLE...';
+    });
+
+    String payload =
+        "${_ssidController.text.trim()}|${_passController.text.trim()}|${_urlController.text.trim()}/api/audio";
+    await _credChar!.write(utf8.encode(payload));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Recapper Onboarding')),
+      body: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              LinearProgressIndicator(value: _step / 3),
+              const SizedBox(height: 32),
+              if (_step == 1) ...[
+                const Icon(Icons.bluetooth_searching, size: 64, color: Color(0xFF6366F1)),
+                const SizedBox(height: 24),
+                Text(_statusMessage, textAlign: TextAlign.center, style: const TextStyle(fontSize: 18)),
+                const SizedBox(height: 24),
+                if (_isScanning || _isConnecting)
+                  const Center(child: CircularProgressIndicator())
+                else
+                  ElevatedButton(
+                    onPressed: _startBLEScan,
+                    child: const Text('Retry BLE Search'),
+                  )
+              ],
+              if (_step == 2) ...[
+                const Text('Connect Recapper to Wi-Fi', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _ssidController,
+                  decoration: const InputDecoration(labelText: 'Wi-Fi SSID (Name)', border: OutlineInputBorder()),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _passController,
+                  obscureText: true,
+                  decoration: const InputDecoration(labelText: 'Wi-Fi Password', border: OutlineInputBorder()),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _urlController,
+                  decoration: const InputDecoration(
+                    labelText: 'Cloudflare Worker URL',
+                    hintText: 'https://recap.subdomain.workers.dev',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                _isProvisioning
+                    ? const Center(child: CircularProgressIndicator())
+                    : ElevatedButton(
+                        onPressed: _sendProvisioning,
+                        style: ElevatedButton.styleFrom(minimumSize: const Size.fromHeight(50)),
+                        child: const Text('Connect Hardware'),
+                      ),
+              ],
+              if (_step == 3) ...[
+                const Icon(Icons.check_circle, size: 72, color: Colors.green),
+                const SizedBox(height: 16),
+                const Text('Hardware Connected!', textAlign: TextAlign.center, style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 12),
+                const Text(
+                  'Voice Test: Press and hold the physical button on your Recapper, speak a short test note, and release.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.grey),
+                ),
+                const SizedBox(height: 32),
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.of(context).pushReplacement(
+                      MaterialPageRoute(builder: (_) => const HomeScreen()),
+                    );
+                  },
+                  style: ElevatedButton.styleFrom(minimumSize: const Size.fromHeight(50)),
+                  child: const Text('Finish Setup & Go to Feed'),
+                )
+              ]
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// HOME FEED & SEARCH SCREEN
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
   List<dynamic> _notes = [];
-  String? _currentRecordPath;
+  bool _isLoading = true;
+  final _searchController = TextEditingController();
 
   @override
   void initState() {
@@ -64,341 +287,97 @@ class _RecapHomeScreenState extends State<RecapHomeScreen> {
     _fetchNotes();
   }
 
-  Future<void> _fetchNotes() async {
+  Future<void> _fetchNotes({String query = ''}) async {
     setState(() => _isLoading = true);
+    final prefs = await SharedPreferences.getInstance();
+    final baseUrl = prefs.getString('worker_url') ?? '';
+    
+    // Clean base URL for endpoints
+    final host = baseUrl.replaceAll('/api/audio', '');
+    final endpoint = query.isEmpty 
+        ? '$host/api/notes' 
+        : '$host/api/search?q=${Uri.encodeComponent(query)}';
+
     try {
-      final res = await http.get(Uri.parse('$cloudflareWorkerUrl/api/notes'));
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
+      final response = await http.get(Uri.parse(endpoint));
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
         setState(() {
-          _notes = data['notes'] ?? [];
+          _notes = query.isEmpty ? data['notes'] : data['results'];
           _isLoading = false;
         });
       }
-    } catch (_) {
+    } catch (e) {
       setState(() => _isLoading = false);
     }
   }
 
-  // --- PHONE MICROPHONE RECORDING LOGIC ---
-  Future<void> _startPhoneRecording() async {
-    final status = await Permission.microphone.request();
-    if (status != PermissionStatus.granted) return;
-
-    final Directory tempDir = await getTemporaryDirectory();
-    _currentRecordPath = '${tempDir.path}/recap_${DateTime.now().millisecondsSinceEpoch}.m4a';
-
-    await _phoneRecorder.start(
-      const RecordConfig(encoder: AudioEncoder.aacLc, sampleRate: 16000),
-      path: _currentRecordPath!,
-    );
-    setState(() => _isRecording = true);
-  }
-
-  Future<void> _stopPhoneRecordingAndSend() async {
-    final path = await _phoneRecorder.stop();
-    setState(() => _isRecording = false);
-
-    if (path != null && File(path).existsSync()) {
-      final bytes = await File(path).readAsBytes();
-      
-      // Upload recorded audio to Cloudflare Worker
-      final res = await http.post(
-        Uri.parse('$cloudflareWorkerUrl/api/audio?mode=phone_mic'),
-        headers: {'Content-Type': 'application/octet-stream'},
-        body: bytes,
-      );
-
-      if (res.statusCode == 200) {
-        _fetchNotes();
-      }
-    }
-  }
-
-  // --- RECAPPER ESP32 TRIGGER LOGIC ---
-  Future<void> _triggerRecapperCapture(bool start) async {
-    try {
-      final action = start ? "start" : "stop";
-      await http.post(Uri.parse('$recapperIp/api/record?action=$action'));
-      setState(() => _isRecording = start);
-      if (!start) {
-        // Allow time for ESP32 to push payload to Cloudflare, then refresh
-        Future.delayed(const Duration(seconds: 2), _fetchNotes);
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Could not reach Recapper hardware device.')),
-      );
-    }
-  }
-
-  void _openAISearchSheet() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      builder: (context) => AISearchSheet(baseUrl: cloudflareWorkerUrl),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Recap'),
-        centerTitle: true,
+        title: const Text('Recap Feed'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _fetchNotes,
+            icon: const Icon(Icons.settings),
+            onPressed: () async {
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.clear();
+              if (mounted) {
+                Navigator.of(context).pushReplacement(
+                  MaterialPageRoute(builder: (_) => const OnboardingScreen()),
+                );
+              }
+            },
           )
         ],
       ),
       body: Column(
         children: [
-          // Hardware / Phone Toggle Card
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-            child: Card.outlined(
-              child: Padding(
-                padding: const EdgeInsets.all(12.0),
-                child: Row(
-                  children: [
-                    Icon(
-                      _useRecapperHardware ? Icons.hardware : Icons.phone_android,
-                      color: theme.colorScheme.primary,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            _useRecapperHardware ? 'Connected to Recapper' : 'Using Phone Mic',
-                            style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-                          ),
-                          Text(
-                            _useRecapperHardware 
-                                ? 'Recording streams through ESP32 + INMP441' 
-                                : 'Recording directly via device hardware',
-                            style: theme.textTheme.bodySmall,
-                          ),
-                        ],
-                      ),
-                    ),
-                    Switch(
-                      value: _useRecapperHardware,
-                      onChanged: (val) {
-                        setState(() => _useRecapperHardware = val);
-                      },
-                    )
-                  ],
-                ),
-              ),
-            ),
-          ),
-
-          // Central Active Recording Card
           Padding(
             padding: const EdgeInsets.all(16.0),
-            child: Card(
-              elevation: 0,
-              color: _isRecording ? theme.colorScheme.errorContainer : theme.colorScheme.surfaceContainerHigh,
-              child: Padding(
-                padding: const EdgeInsets.all(24.0),
-                child: Column(
-                  children: [
-                    Icon(
-                      _isRecording ? Icons.graphic_eq : Icons.mic_none,
-                      size: 48,
-                      color: _isRecording ? theme.colorScheme.onErrorContainer : theme.colorScheme.primary,
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      _isRecording ? 'Listening and transcribing...' : 'Press and hold to record note',
-                      style: theme.textTheme.titleSmall?.copyWith(
-                        color: _isRecording ? theme.colorScheme.onErrorContainer : theme.colorScheme.onSurface,
-                      ),
-                    ),
-                  ],
+            child: TextField(
+              controller: _searchController,
+              decoration: InputDecoration(
+                hintText: 'Search voice notes by meaning...',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: IconButton(
+                  icon: const Icon(Icons.arrow_forward),
+                  onPressed: () => _fetchNotes(query: _searchController.text),
                 ),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
               ),
+              onSubmitted: (val) => _fetchNotes(query: val),
             ),
           ),
-
-          // Transcribed Feed
           Expanded(
             child: _isLoading
                 ? const Center(child: CircularProgressIndicator())
-                : _notes.isEmpty
-                    ? Center(child: Text('No transcripts captured yet.', style: theme.textTheme.bodyLarge))
-                    : ListView.builder(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        itemCount: _notes.length,
-                        itemBuilder: (context, index) {
-                          final note = _notes[index];
-                          final dateStr = DateFormat('MMM d, h:mm a').format(
-                            DateTime.fromMillisecondsSinceEpoch((note['timestamp'] ?? 0) * 1000),
-                          );
-                          final isRecapper = note['mode']?.contains('recapper') ?? false;
-
-                          return Card.outlined(
-                            margin: const EdgeInsets.only(bottom: 12),
-                            child: ListTile(
-                              leading: CircleAvatar(
-                                backgroundColor: isRecapper 
-                                    ? theme.colorScheme.tertiaryContainer 
-                                    : theme.colorScheme.primaryContainer,
-                                child: Icon(
-                                  isRecapper ? Icons.memory : Icons.mic,
-                                  size: 20,
-                                  color: isRecapper 
-                                      ? theme.colorScheme.onTertiaryContainer 
-                                      : theme.colorScheme.onPrimaryContainer,
+                : RefreshIndicator(
+                    onRefresh: () => _fetchNotes(),
+                    child: _notes.isEmpty
+                        ? const Center(child: Text('No voice notes recorded yet.'))
+                        : ListView.builder(
+                            itemCount: _notes.length,
+                            itemBuilder: (context, index) {
+                              final item = _notes[index];
+                              final text = item['text'] ?? item['item']?['metadata']?['text'] ?? '';
+                              final mode = item['mode'] ?? 'PTT';
+                              return Card(
+                                margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                                child: ListTile(
+                                  leading: CircleAvatar(
+                                    child: Icon(mode == 'PTT' ? Icons.mic : Icons.loop),
+                                  ),
+                                  title: Text(text),
+                                  subtitle: Text('Mode: $mode'),
                                 ),
-                              ),
-                              title: Text(note['text'] ?? ''),
-                              subtitle: Padding(
-                                padding: const EdgeInsets.only(top: 4.0),
-                                child: Text('$dateStr • Source: ${note['mode']}'),
-                              ),
-                            ),
-                          );
-                        },
-                      ),
+                              );
+                            },
+                          ),
+                  ),
           ),
         ],
-      ),
-
-      // Press-and-Hold Record Action
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
-      floatingActionButton: GestureDetector(
-        onLongPressStart: (_) {
-          if (_useRecapperHardware) {
-            _triggerRecapperCapture(true);
-          } else {
-            _startPhoneRecording();
-          }
-        },
-        onLongPressEnd: (_) {
-          if (_useRecapperHardware) {
-            _triggerRecapperCapture(false);
-          } else {
-            _stopPhoneRecordingAndSend();
-          }
-        },
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            FloatingActionButton.large(
-              onPressed: () {},
-              child: Icon(_isRecording ? Icons.mic_fixed : Icons.mic),
-            ),
-            const SizedBox(width: 16),
-            FloatingActionButton(
-              onPressed: _openAISearchSheet,
-              child: const Icon(Icons.auto_awesome),
-            )
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class AISearchSheet extends StatefulWidget {
-  final String baseUrl;
-  const AISearchSheet({super.key, required this.baseUrl});
-
-  @override
-  State<AISearchSheet> createState() => _AISearchSheetState();
-}
-
-class _AISearchSheetState extends State<AISearchSheet> {
-  final TextEditingController _queryController = TextEditingController();
-  bool _isSearching = false;
-  String? _aiAnswer;
-  List<dynamic> _matches = [];
-
-  Future<void> _search() async {
-    final q = _queryController.text.trim();
-    if (q.isEmpty) return;
-
-    setState(() {
-      _isSearching = true;
-      _aiAnswer = null;
-    });
-
-    try {
-      final res = await http.get(Uri.parse('${widget.baseUrl}/api/search?q=${Uri.encodeComponent(q)}'));
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        setState(() {
-          _aiAnswer = data['ai_answer'];
-          _matches = data['matched_notes'] ?? [];
-          _isSearching = false;
-        });
-      }
-    } catch (_) {
-      setState(() => _isSearching = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return Padding(
-      padding: EdgeInsets.only(
-        bottom: MediaQuery.of(context).viewInsets.bottom,
-        left: 16, right: 16, top: 24,
-      ),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.auto_awesome, color: theme.colorScheme.primary),
-                const SizedBox(width: 8),
-                Text('Recap AI Memory Search', style: theme.textTheme.titleLarge),
-              ],
-            ),
-            const SizedBox(height: 16),
-            SearchBar(
-              controller: _queryController,
-              hintText: 'Search your transcripts with AI...',
-              trailing: [IconButton(icon: const Icon(Icons.search), onPressed: _search)],
-              onSubmitted: (_) => _search(),
-            ),
-            const SizedBox(height: 20),
-            if (_isSearching) const Center(child: CircularProgressIndicator()),
-            if (_aiAnswer != null) ...[
-              Card(
-                color: theme.colorScheme.primaryContainer,
-                elevation: 0,
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Text(
-                    _aiAnswer!,
-                    style: TextStyle(color: theme.colorScheme.onPrimaryContainer),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Text('Context Snippets:', style: theme.textTheme.titleSmall),
-              ..._matches.map((m) => ListTile(
-                dense: true,
-                title: Text(m['text'] ?? ''),
-                subtitle: Text(m['mode'] ?? ''),
-              )),
-            ],
-            const SizedBox(height: 24),
-          ],
-        ),
       ),
     );
   }
