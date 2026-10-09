@@ -23,17 +23,13 @@ jobs:
           channel: 'stable'
 
       - name: Get Dependencies
-        run: |
-          cd app
-          flutter pub get
+        run: flutter pub get
 
       - name: Build APK
-        run: |
-          cd app
-          flutter build apk --release
+        run: flutter build apk --release
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: recap-release-apk
-          path: app/build/app/outputs/flutter-apk/app-release.apk
+          path: build/app/outputs/flutter-apk/app-release.apk
