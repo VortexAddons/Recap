@@ -1,0 +1,17 @@
+name = "recap-backend"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
+
+# Workers AI: speech-to-text, embeddings and the search assistant
+[ai]
+binding = "AI"
+
+# One SQLite-backed Durable Object per user holds notes + search vectors.
+# No database IDs to create or paste anywhere.
+[[durable_objects.bindings]]
+name = "USER_STORE"
+class_name = "UserStore"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserStore"]

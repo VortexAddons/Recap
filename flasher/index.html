@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flash Recapper</title>
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<style>
+  :root {
+    --bg: #f4f7f5; --panel: #ffffff; --ink: #14231d; --muted: #566a61;
+    --line: #d3ded8; --accent: #0f6b52; --accent-ink: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0e1613; --panel: #16221d; --ink: #e5f0ea; --muted: #94aaa0; --line: #28382f; --accent: #4fd1a5; --accent-ink: #04251a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.55 "Segoe UI", system-ui, sans-serif; padding: 32px 16px; }
+  main { max-width: 560px; margin: 0 auto; }
+  h1 { font-size: 2rem; margin: 0 0 6px; letter-spacing: -0.02em; }
+  .lede { color: var(--muted); margin: 0 0 24px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 22px; margin-bottom: 16px; }
+  h2 { font-size: 1.1rem; margin: 0 0 8px; }
+  ol { margin: 8px 0 0; padding-left: 22px; color: var(--muted); }
+  li { margin: 4px 0; }
+  .go { text-align: center; }
+  button[slot="activate"] {
+    font: inherit; font-weight: 600; color: var(--accent-ink); background: var(--accent);
+    border: 0; border-radius: 999px; padding: 14px 28px; cursor: pointer;
+  }
+  button[slot="activate"]:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  .note { color: var(--muted); font-size: .92rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Flash Recapper</h1>
+  <p class="lede">Install the firmware on your ESP32 straight from the browser. No toolchain needed.</p>
+
+  <section>
+    <h2>Before you start</h2>
+    <ol>
+      <li>Use Chrome or Edge on a computer (Safari and Firefox can't flash over USB).</li>
+      <li>Plug the ESP32 into your computer with a data-capable USB cable.</li>
+      <li>If the board isn't listed in the next step, install the CP210x or CH340 USB driver for it.</li>
+    </ol>
+  </section>
+
+  <section class="go">
+    <esp-web-install-button manifest="firmware/manifest.json">
+      <button slot="activate">Install Recapper firmware</button>
+      <span slot="unsupported">This browser can't flash devices. Open this page in Chrome or Edge on a computer.</span>
+      <span slot="not-allowed">Flashing needs HTTPS or localhost. Open this page from the address it was published at.</span>
+    </esp-web-install-button>
+  </section>
+
+  <section>
+    <h2>After flashing</h2>
+    <ol>
+      <li>Open the Recap app on your Android phone and tap Recapper, then Set up.</li>
+      <li>Follow the prompts: pair, say a test phrase, pick your WiFi.</li>
+      <li>To redo setup later, hold the button while plugging in the ESP32 until setup mode starts (about 3 seconds).</li>
+    </ol>
+    <p class="note">Wiring: INMP441 WS to GPIO25, SCK to GPIO26, SD to GPIO33, L/R to GND, VDD to 3.3V, GND to GND. Button between GPIO14 and GND.</p>
+  </section>
+</main>
+</body>
+</html>
