@@ -78,7 +78,11 @@ async function transcribe(req, env, store, url) {
 
   const stt = await env.AI.run(STT, { audio: toBase64(audio) });
   const text = (stt.text || "").trim();
-  if (text.length < 3 || JUNK.test(text)) return json({ skipped: true, reason: "no speech" });
+  console.log(`stt heard (${text.length} chars): "${text.slice(0, 120)}"`);
+  if (text.length < 3 || JUNK.test(text)) {
+    console.log("skipped: no usable speech");
+    return json({ skipped: true, reason: "no speech", heard: text });
+  }
 
   const chunks = splitText(text);
   const emb = await env.AI.run(EMBED, { text: chunks });
